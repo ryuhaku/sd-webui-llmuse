@@ -131,6 +131,16 @@ Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 
 
 ## 更新履歴
 
+### v2.0.0
+
+- 接続先プロバイダー選択（LM Studio / Strata）を追加。接続先ごとにモデル一覧を取得し、モデル選択も接続先別に保存する
+- Strata は OpenAI 互換 API（`GET /v1/models` / `POST /v1/chat/completions`）を利用。`reasoning_effort: "none"` を送り、Thinking は無効化して推論する
+- Strata に対してはモデルのロード・アンロード・`ttl` を送らない（モデルと VRAM は Strata 側で管理する）
+- API キーは環境変数 `LLMUSE_STRATA_API_KEY`（または `STRATA_API_KEY`）からのみ読み込み、設定ファイル・画面・ログには表示しない
+- 接続失敗・認証失敗・モデル一覧取得失敗・一覧が空・空応答・タイムアウトを区別して表示し、エラー時はプロンプト送信と画像生成を行わない
+- `provider` 項目が無い既存 settings.json は LM Studio として扱い、既存動作は変えない
+- Auto-unload / Force Unload は LM Studio のみの項目となり、Strata 選択時は設定に表示されない
+
 ### v1.3.0
 
 - img2img タブに対応。Vision モデルを選択し、img2img に投入した画像を読み込んだ英語プロンプトを生成
