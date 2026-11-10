@@ -68,19 +68,29 @@ txt2img タブのプロンプト欄の下に **「✦ LLMuse」** アコーデ�
 
 | 項目 | 説明 |
 |------|------|
-| LM Studio URL | サーバーアドレス（デフォルト: `http://localhost:1234`） |
+| LLM Provider | プロンプト生成に使う接続先を `LM Studio` / `Strata` から選択（初期値: LM Studio） |
+| LM Studio URL | LM Studio のサーバーアドレス（デフォルト: `http://localhost:1234`） |
+| Strata URL | Strata の Base URL（例: `http://127.0.0.1:47831`）。`/v1` は付けない |
 | Randomness | 出力のランダム性。低いほど忠実、高いほど多様（0.1〜2.0） |
 | Auto-send | 生成後に自動でプロンプト欄へ送信する |
 | Auto-generate | プロンプト欄へ送信後、自動で画像生成を開始する |
 | Continuous | Run LLM → プロンプト送信 → 画像生成を繰り返す |
 | Loop delay | Continuous 有効時に、次の Run LLM を実行するまでの待機時間 |
-| Auto-unload | 使用後 n 秒でモデルを VRAM から解放する |
+| Auto-unload | 使用後 n 秒でモデルを VRAM から解放する（LM Studio のみ） |
 | Timeout | n 秒以内に応答がなければ中断する |
-| Force Unload | 全モデルを今すぐ VRAM から解放する |
+| Force Unload | 全モデルを今すぐ VRAM から解放する（LM Studio のみ） |
 
 Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 画像生成 → Run LLM` の流れを自動で繰り返します。
 なお、Continuous 有効時は、プロンプトの意図しない累積を防ぐため、Add / Rep の選択に関わらず上書き送信します。
 連続生成を停止する場合は、**Run LLM** ボタンを右クリックします。現在の画像生成が完了した後、次の Run LLM 実行を停止します。
+
+### 接続先の切り替え（LM Studio / Strata）
+
+- `LLM Provider` を切り替えると、モデル一覧はその接続先のものだけを表示します。モデル選択は接続先ごとに別々に保存されるため、LM Studio で選んだモデル ID が Strata へ渡ることはありません。
+- Strata 選択中は、LLMuse からモデルのロード・アンロード要求を一切送りません。推論前の自動ロード、`ttl` の送信、推論後の自動解放は行われず、Auto-unload / Force Unload の項目も表示されません。Strata のモデルと VRAM は Strata 側で管理されます。
+- Strata への推論は Thinking を無効化して送信します（`reasoning_effort: "none"`）。
+- Strata で API キーが有効な場合は、`LLMUSE_STRATA_API_KEY`（既存の `STRATA_API_KEY` でも可）を環境変数に設定してから Forge Neo を起動してください。キーは settings.json・画面・ログには表示されません。キーなしで認証を要求された場合は、その旨を 401 の案内として表示します。
+- Strata の API ポートは Strata の起動ごとに変わる可能性があります。接続できない場合は ⚙ 設定の `Strata URL` を現在のポートに合わせます。モデル一覧の取得に失敗したときは、モデル選択欄の下に接続失敗・認証失敗・一覧が空であることを表示し、その状態ではプロンプト送信も画像生成も始まりません。
 
 ### プリセットエディタ（📋 ボタン）
 
@@ -103,3 +113,9 @@ Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 
 ### Unreleased
 
 - Auto-generate と Continuous generation モードを追加
+- 接続先プロバイダー選択（LM Studio / Strata）を追加
+  - Strata は OpenAI 互換 API（`GET /v1/models` / `POST /v1/chat/completions`）を使い、`reasoning_effort: "none"` で推論する
+  - Strata に対してはモデルのロード・アンロード・`ttl` を送らない（モデルと VRAM は Strata 側で管理）
+  - API キーは環境変数 `LLMUSE_STRATA_API_KEY`（または `STRATA_API_KEY`）からのみ読み込み、設定ファイル・画面・ログには出さない
+  - 接続失敗・認証失敗・モデル一覧取得失敗・空応答を区別して表示し、エラー時はプロンプト送信と画像生成を行わない
+  - `provider` 項目が無い既存 settings.json は LM Studio として扱い、既存動作は変えない

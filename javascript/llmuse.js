@@ -512,6 +512,8 @@ function llmDecOpenSettings(tab) {
     const ttlEnabled = s.gpu_ttl_enabled     ?? false;
     const ttl        = s.gpu_ttl             ?? 300;
     const lmUrl      = s.lm_url              ?? "http://localhost:1234";
+    const strataUrl  = s.strata_url          ?? "http://127.0.0.1:47831";
+    const provider   = s.provider === "strata" ? "strata" : "lmstudio";
     const autoSend   = s.auto_send           ?? false;
     const autoGen    = s.auto_generate       ?? false;
     const contGen    = s.continuous_generate ?? false;
@@ -529,11 +531,36 @@ function llmDecOpenSettings(tab) {
 
             <div class="llm-dec-settings-body">
 
-                <!-- URL -->
+                <!-- Provider -->
                 <div class="llm-dec-settings-row">
+                    <label class="llm-dec-settings-label">LLM Provider</label>
+                    <div class="llm-dec-settings-inline">
+                        <span class="llm-dec-settings-hint">Choose which LLM creates the prompt</span>
+                        <select class="llm-dec-settings-select" id="llm-dec-settings-provider"
+                            onchange="llmDecSettingsProviderChanged()">
+                            <option value="lmstudio"${provider === "lmstudio" ? " selected" : ""}>LM Studio</option>
+                            <option value="strata"${provider === "strata" ? " selected" : ""}>Strata</option>
+                        </select>
+                    </div>
+                    <div class="llm-dec-settings-note" id="llm-dec-settings-strata-note" style="display:none">
+                        Strata models are managed by Strata: LLMuse never loads or unloads them.
+                        The API key is read only from the LLMUSE_STRATA_API_KEY environment variable.
+                    </div>
+                </div>
+
+                <!-- LM Studio URL -->
+                <div class="llm-dec-settings-row" id="llm-dec-settings-row-lm-url">
                     <label class="llm-dec-settings-label">LM Studio URL</label>
                     <input type="text" class="llm-dec-settings-url" id="llm-dec-settings-url"
                         value="${lmUrl}" placeholder="http://localhost:1234">
+                </div>
+
+                <!-- Strata URL -->
+                <div class="llm-dec-settings-row" id="llm-dec-settings-row-strata-url" style="display:none">
+                    <label class="llm-dec-settings-label">Strata URL</label>
+                    <input type="text" class="llm-dec-settings-url" id="llm-dec-settings-strata-url"
+                        value="${strataUrl}" placeholder="http://127.0.0.1:47831">
+                    <span class="llm-dec-settings-hint">Base URL only — do not add /v1</span>
                 </div>
 
                 <!-- Randomness -->
@@ -582,7 +609,7 @@ function llmDecOpenSettings(tab) {
                 </div>
 
                 <!-- Auto-unload -->
-                <div class="llm-dec-settings-row">
+                <div class="llm-dec-settings-row" id="llm-dec-settings-row-unload">
                     <label class="llm-dec-settings-label">Auto-unload</label>
                     <label class="llm-dec-settings-check-label">
                         <input type="checkbox" id="llm-dec-settings-ttl-enabled"
@@ -608,7 +635,7 @@ function llmDecOpenSettings(tab) {
                 </div>
 
                 <!-- Force Unload -->
-                <div class="llm-dec-settings-row">
+                <div class="llm-dec-settings-row" id="llm-dec-settings-row-force">
                     <label class="llm-dec-settings-label">Force Unload</label>
                     <div class="llm-dec-settings-inline">
                         <span class="llm-dec-settings-hint">Remove all models from VRAM now</span>
@@ -624,11 +651,26 @@ function llmDecOpenSettings(tab) {
             </div>
         </div>`;
     document.body.appendChild(modal);
+    llmDecSettingsProviderChanged();
 }
 
 function llmDecCloseSettings() {
     const m = document.getElementById("llm-dec-settings-modal");
     if (m) m.remove();
+}
+
+/* 接続先に合わせた項目の出し分け。StrataではVRAM管理項目を使わない。 */
+function llmDecSettingsProviderChanged() {
+    const isStrata = document.getElementById("llm-dec-settings-provider")?.value === "strata";
+    const setVisible = (id, visible) => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = visible ? "" : "none";
+    };
+    setVisible("llm-dec-settings-row-lm-url", !isStrata);
+    setVisible("llm-dec-settings-row-strata-url", isStrata);
+    setVisible("llm-dec-settings-row-unload", !isStrata);
+    setVisible("llm-dec-settings-row-force", !isStrata);
+    setVisible("llm-dec-settings-strata-note", isStrata);
 }
 
 
@@ -661,17 +703,21 @@ function llmDecSaveSettings(tab) {
     const ttlEn    = document.getElementById("llm-dec-settings-ttl-enabled")?.checked      ?? false;
     const ttl      = parseInt(document.getElementById("llm-dec-settings-ttl")?.value)      || 300;
     const lmUrl    = document.getElementById("llm-dec-settings-url")?.value.trim()         || "http://localhost:1234";
+    const strataUrl = document.getElementById("llm-dec-settings-strata-url")?.value.trim() || "http://127.0.0.1:47831";
+    const provider  = document.getElementById("llm-dec-settings-provider")?.value === "strata" ? "strata" : "lmstudio";
     const autoSend = document.getElementById("llm-dec-settings-auto-send")?.checked        ?? false;
     const autoGen  = document.getElementById("llm-dec-settings-autogen")?.checked          ?? false;
     const contGen  = document.getElementById("llm-dec-settings-continuous")?.checked       ?? false;
     const loopDelay = parseInt(document.getElementById("llm-dec-settings-loop-delay")?.value) || 500;
 
     llmDecFireTrigger(trigger, {
+        provider,
         temperature: temp,
         timeout,
         gpu_ttl_enabled: ttlEn,
         gpu_ttl: ttl,
         lm_url: lmUrl,
+        strata_url: strataUrl,
         auto_send: autoSend,
         auto_generate: autoGen,
         continuous_generate: contGen,
@@ -1086,6 +1132,30 @@ function llmDecDeleteFromModal(tab) {
     font-size: 12px; font-family: monospace; outline: none;
 }
 .llm-dec-settings-url:focus { border-color: var(--body-text-color-subdued); }
+.llm-dec-settings-select {
+    height: 30px; padding: 0 8px; flex-shrink: 0;
+    background: var(--input-background-fill);
+    border: 1px solid var(--border-color-primary);
+    border-radius: 6px; color: var(--body-text-color);
+    font-size: 13px; outline: none; cursor: pointer;
+}
+.llm-dec-settings-note {
+    font-size: 12px; line-height: 1.5;
+    color: var(--body-text-color-subdued);
+    background: var(--background-fill-secondary);
+    border: 1px solid var(--border-color-primary);
+    border-radius: 6px; padding: 6px 8px;
+}
+
+/* ── 接続先・モデル一覧の警告 ── */
+.llm-dec-notice {
+    margin: 2px 0 6px 0; padding: 5px 8px;
+    font-size: 12px; line-height: 1.5;
+    color: #f87171;
+    background: rgba(239,68,68,0.08);
+    border: 1px solid rgba(239,68,68,0.35);
+    border-radius: 6px;
+}
 
 .llm-dec-run-busy {
     background: #374151 !important;

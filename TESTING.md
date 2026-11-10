@@ -42,3 +42,39 @@
 - Batch success, fatal interruption, and image-specific skip branches with Forge state stubs.
 
 Actual Forge Neo UI and end-to-end generation still require local testing because the Forge runtime and LM Studio models are not available in the build environment.
+
+## Strata provider (feature/strata-provider)
+
+### Implemented scope
+
+- Settings → `LLM Provider` selects `LM Studio` or `Strata`; the choice and both URLs are persisted.
+- A missing `provider` in an existing `settings.json` keeps LM Studio behaviour (backward compatible).
+- Model lists are read per provider: LM Studio `GET /api/v1/models`, Strata `GET /v1/models` (`data[].id`).
+- Model selection is stored per provider (`model`/`vision_model` for LM Studio, `strata_model`/`strata_vision_model` for Strata), so LM Studio model IDs are never sent to Strata.
+- Strata requests add `Authorization: Bearer` only when `LLMUSE_STRATA_API_KEY` (or `STRATA_API_KEY`) exists in the environment; the key never enters settings.json, the UI state JSON, or error text.
+- Strata requests use `reasoning_effort: "none"` and never send `enable_thinking`, `ttl`, or any model load/unload request.
+- Auto-unload and Force Unload are hidden while Strata is selected, and Force Unload issues no request in Strata mode.
+- Connection, authentication, model-list failure, empty list, empty response and timeout are distinguished and labelled with the active provider; a failed Run LLM never sends a prompt or starts image generation.
+
+### Automated checks performed
+
+`llmuse_strata_test.py` (workspace) — 35 checks, all passing, with a mock LM Studio/Strata server plus one live Strata instance: settings backward compatibility, per-provider model list and auto-selection, absence of model-management requests in Strata mode, 401/connection/empty handling, API key masking, unchanged LM Studio parameters and wording, and one live Japanese → English prompt generation.
+
+`llmuse_ui_build_test.py` (workspace) — builds the real Gradio UI for both tabs in three states (Strata reachable, Strata down, LM Studio down) without starting the WebUI.
+
+### Not verified in the build environment
+
+- The real Forge Neo UI: the provider switch in the settings dialog, Add/Rep, Auto-send, Auto-generate, Continuous and its right-click stop.
+- A live LM Studio server (it was not running); LM Studio behaviour was checked only against a mock.
+- Strata img2img/Vision prompts.
+
+### Suggested manual test order
+
+1. Start Strata and check its current API port (Strata assigns a new port on each start unless it is fixed in Strata itself).
+2. Start Forge Neo, open LLMuse → ⚙ Settings → `LLM Provider` = `Strata`, set `Strata URL` to the current port (base URL only, without `/v1`), then Save.
+3. Confirm the model dropdown lists the Strata model and that the Auto-unload/Force Unload rows are gone.
+4. Enter a Japanese instruction, press Run LLM, and confirm an English prompt with no reasoning text.
+5. Test Add/Rep, Auto-send, Auto-generate, then Continuous, and stop it with a right-click.
+6. Stop Strata (or set a wrong URL) and confirm the error is shown, no prompt is sent, and Continuous stops.
+7. Switch back to `LM Studio` and confirm the previous model list, auto-load and VRAM behaviour still work.
+8. If an API key is enabled in Strata, set `LLMUSE_STRATA_API_KEY` before starting Forge Neo; the 401 message names that variable.

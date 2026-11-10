@@ -2,6 +2,8 @@ import base64
 import io
 import json
 import hashlib
+import html
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +16,15 @@ from modules import scripts, shared
 from modules.scripts import OnComponent
 
 LM_STUDIO_BASE = "http://localhost:1234"
+STRATA_BASE = "http://127.0.0.1:47831"
+
+PROVIDER_LMSTUDIO = "lmstudio"
+PROVIDER_STRATA = "strata"
+PROVIDERS = (PROVIDER_LMSTUDIO, PROVIDER_STRATA)
+
+# StrataのAPIキーは環境変数だけで扱う。
+# settings.json・Git管理ファイル・ログ・UIの状態JSONには残さない。
+STRATA_API_KEY_ENVS = ("LLMUSE_STRATA_API_KEY", "STRATA_API_KEY")
 
 EXTENSION_DIR = Path(__file__).resolve().parent.parent
 PRESETS_FILE = EXTENSION_DIR / "presets.json"
@@ -22,11 +33,15 @@ SETTINGS_FILE = EXTENSION_DIR / "settings.json"
 DEFAULT_SETTINGS = {
     "model": "",
     "vision_model": "",
+    "provider": PROVIDER_LMSTUDIO,
+    "strata_model": "",
+    "strata_vision_model": "",
     "temperature": 0.8,
     "timeout": 30,
     "gpu_ttl_enabled": False,
     "gpu_ttl": 300,
     "lm_url": "http://localhost:1234",
+    "strata_url": STRATA_BASE,
     "auto_send": False,
     "send_mode": "append",
     "auto_generate": False,
@@ -91,10 +106,17 @@ def _load_settings() -> dict:
 
 def _save_settings(data: dict):
     s = _load_settings()
+    if "provider" in data:
+        p = str(data["provider"] or "").strip().lower()
+        s["provider"] = p if p in PROVIDERS else PROVIDER_LMSTUDIO
     if "model" in data:
         s["model"] = str(data["model"] or "")
     if "vision_model" in data:
         s["vision_model"] = str(data["vision_model"] or "")
+    if "strata_model" in data:
+        s["strata_model"] = str(data["strata_model"] or "")
+    if "strata_vision_model" in data:
+        s["strata_vision_model"] = str(data["strata_vision_model"] or "")
     if "temperature" in data:
         s["temperature"] = float(data["temperature"])
     if "timeout" in data:
@@ -105,6 +127,8 @@ def _save_settings(data: dict):
         s["gpu_ttl"] = max(1, int(data["gpu_ttl"]))
     if "lm_url" in data:
         s["lm_url"] = str(data["lm_url"]).rstrip("/") or LM_STUDIO_BASE
+    if "strata_url" in data:
+        s["strata_url"] = str(data["strata_url"]).rstrip("/") or STRATA_BASE
     if "auto_send" in data:
         s["auto_send"] = bool(data["auto_send"])
     if "send_mode" in data:
@@ -156,7 +180,65 @@ def _initial_preset(settings: dict, presets: dict, tab: str) -> str:
     return candidate if candidate in presets else names[0]
 
 
-# ── LM Studio API ───────────────────────────────────────────────────────────
+# ── 接続プロバイダー選択 ────────────────────────────────────────────────────
+def _provider(settings: dict | None = None) -> str:
+    """provider 項目が無い既存 settings.json は LM Studio として扱う（後方互換）。"""
+    s = settings if settings is not None else _load_settings()
+    chosen = str(s.get("provider") or "").strip().lower()
+    return PROVIDER_STRATA if chosen == PROVIDER_STRATA else PROVIDER_LMSTUDIO
+
+
+def _is_strata(settings: dict | None = None) -> bool:
+    return _provider(settings) == PROVIDER_STRATA
+
+
+def _provider_name(provider: str) -> str:
+    return "Strata" if provider == PROVIDER_STRATA else "LM Studio"
+
+
+def _provider_base(settings: dict, provider: str | None = None) -> str:
+    """Base URL は APIパスと分離して扱う（末尾スラッシュと /v1 を持たせない）。"""
+    provider = provider or _provider(settings)
+    fallback = STRATA_BASE if provider == PROVIDER_STRATA else LM_STUDIO_BASE
+    raw = settings.get("strata_url") if provider == PROVIDER_STRATA else settings.get("lm_url")
+    base = str(raw or fallback).strip().rstrip("/")
+    if base.lower().endswith("/v1"):
+        base = base[:-3].rstrip("/")
+    return base or fallback
+
+
+def _strata_api_key() -> str:
+    """StrataのAPIキーは環境変数からだけ読む。UI・設定ファイル・ログには出さない。"""
+    for name in STRATA_API_KEY_ENVS:
+        value = str(os.environ.get(name) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _strata_headers() -> dict:
+    key = _strata_api_key()
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _mask_key(message: str) -> str:
+    """応答テキストにAPIキーが混ざっても表示・ログへ出さない。"""
+    key = _strata_api_key()
+    return message.replace(key, "***") if key else message
+
+
+def _model_setting_key(provider: str, tab: str) -> str:
+    """LM Studioで選んだモデルIDをStrataへそのまま渡さないため、選択は接続先ごとに分ける。"""
+    if provider == PROVIDER_STRATA:
+        return "strata_vision_model" if tab == "img2img" else "strata_model"
+    return "vision_model" if tab == "img2img" else "model"
+
+
+def _selected_model(settings: dict, tab: str) -> str:
+    return str(settings.get(_model_setting_key(_provider(settings), tab)) or "").strip()
+
+
+# ── LM Studio / Strata: モデル一覧 ──────────────────────────────────────────
 @dataclass
 class LMResult:
     text: str = ""
@@ -168,21 +250,78 @@ class LMResult:
         return bool(self.text) and not self.error
 
 
-def _get_models(vision_only: bool = False) -> list:
-    """GET /api/v1/models — インストール済みモデルを返す。"""
+def _list_models(provider: str | None = None, vision_only: bool = False) -> tuple:
+    """モデル一覧を (ids, error_kind, message) で返す。
+
+    error_kind: "" / connection / auth / http / empty
+    """
+    settings = _load_settings()
+    provider = provider or _provider(settings)
+    base = _provider_base(settings, provider)
+    label = _provider_name(provider)
+
     try:
-        base = _load_settings().get("lm_url", LM_STUDIO_BASE)
-        r = requests.get(f"{base}/api/v1/models", timeout=5)
-        if r.ok:
+        if provider == PROVIDER_STRATA:
+            r = requests.get(f"{base}/v1/models", headers=_strata_headers(), timeout=5)
+        else:
+            r = requests.get(f"{base}/api/v1/models", timeout=5)
+    except requests.exceptions.ConnectionError:
+        return [], "connection", f"Cannot connect to {label} at {base}."
+    except requests.exceptions.Timeout:
+        return [], "connection", f"Timed out while listing {label} models."
+    except Exception as e:
+        return [], "connection", _mask_key(f"Failed to list {label} models: {e}")
+
+    if r.status_code in (401, 403):
+        hint = " Set LLMUSE_STRATA_API_KEY and restart Forge Neo." if provider == PROVIDER_STRATA else ""
+        return [], "auth", f"Authentication failed for {label} (HTTP {r.status_code}).{hint}"
+    if not r.ok:
+        return [], "http", f"Failed to list {label} models ({r.status_code}): {_api_error_message(r, provider)}"
+
+    try:
+        if provider == PROVIDER_STRATA:
+            ids = [
+                str(m["id"])
+                for m in (r.json().get("data") or [])
+                if isinstance(m, dict) and m.get("id")
+            ]
+        else:
             models = [m for m in r.json().get("models", []) if m.get("key") and m.get("type", "llm") == "llm"]
             if vision_only:
                 capability_known = any("vision" in (m.get("capabilities") or {}) for m in models)
                 if capability_known:
                     models = [m for m in models if (m.get("capabilities") or {}).get("vision") is True]
-            return [m["key"] for m in models]
-    except Exception:
-        pass
-    return []
+            ids = [m["key"] for m in models]
+    except Exception as e:
+        return [], "http", _mask_key(f"Invalid {label} model list: {e}")
+
+    if not ids:
+        return [], "empty", f"No usable model is available on {label}."
+    return ids, "", ""
+
+
+def _notice_update(message: str) -> dict:
+    """モデル一覧・接続に関する警告をGradioのHTMLへ渡す（APIキーは含めない）。"""
+    if not message:
+        return gr.update(value="", visible=False)
+    safe = html.escape(str(message))[:400]
+    return gr.update(value=f'<div class="llm-dec-notice">&#9888; {safe}</div>', visible=True)
+
+
+def _model_dropdown_state(settings: dict, tab: str) -> tuple:
+    """接続先に合わせたモデル一覧・選択値・警告を返す。"""
+    provider = _provider(settings)
+    ids, kind, message = _list_models(provider, vision_only=(tab == "img2img"))
+    key = _model_setting_key(provider, tab)
+    saved = str(settings.get(key) or "").strip()
+    value = saved or None
+
+    if provider == PROVIDER_STRATA and ids and (not saved or saved not in ids):
+        # Strataではサーバーが一覧で返したIDのみを使い、LM StudioのモデルIDは使わない。
+        value = ids[0]
+        _save_settings({key: value})
+
+    return gr.update(choices=ids, value=value), _notice_update(message if kind else "")
 
 
 def _unload_all_models(base: str) -> None:
@@ -204,19 +343,19 @@ def _unload_all_models(base: str) -> None:
         pass
 
 
-def _api_error_message(response: requests.Response) -> str:
+def _api_error_message(response: requests.Response, provider: str = PROVIDER_LMSTUDIO) -> str:
     try:
         body = response.json()
         err = body.get("error")
         if isinstance(err, dict):
             msg = err.get("message") or err.get("type")
             if msg:
-                return str(msg)[:300]
+                return _mask_key(str(msg))[:300]
         if err:
-            return str(err)[:300]
+            return _mask_key(str(err))[:300]
     except Exception:
         pass
-    return (response.text or response.reason or "Unknown LM Studio error")[:300]
+    return _mask_key(response.text or response.reason or f"Unknown {_provider_name(provider)} error")[:300]
 
 
 def _ensure_model_loaded(base: str, model_id: str, settings: dict, require_vision: bool = False) -> LMResult:
@@ -298,39 +437,75 @@ def _extract_response_text(data: dict) -> str:
 
 def _call_chat(model_id: str, messages: list, max_tokens: int = 512, require_vision: bool = False) -> LMResult:
     settings = _load_settings()
-    base = settings.get("lm_url", LM_STUDIO_BASE)
+    provider = _provider(settings)
+    base = _provider_base(settings, provider)
+    label = _provider_name(provider)
+    strata = provider == PROVIDER_STRATA
 
-    ready = _ensure_model_loaded(base, model_id, settings, require_vision=require_vision)
-    if not ready.ok:
-        return ready
+    if not model_id:
+        return LMResult(
+            error=f"No model selected in LLMuse. Choose a model for {label} first.",
+            kind="fatal",
+        )
 
-    payload: dict[str, Any] = {
-        "model": model_id,
-        "messages": messages,
-        "temperature": settings["temperature"],
-        "max_tokens": max_tokens,
-        "stream": False,
-        "enable_thinking": False,
-    }
-    if settings.get("gpu_ttl_enabled") and settings.get("gpu_ttl", 0) > 0:
-        payload["ttl"] = settings["gpu_ttl"]
+    headers: dict[str, str] = {}
+    if strata:
+        # Strata側ではモデルのロード・VRAM管理を行わないため、
+        # 推論前の自動ロード、ttl送信、推論後の自動アンロードはいずれも実行しない。
+        headers = _strata_headers()
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": messages,
+            "temperature": settings["temperature"],
+            "max_tokens": max_tokens,
+            "stream": False,
+            # 画像生成プロンプト作成に長い推論過程は不要なため、Thinkingは既定で無効化する。
+            "reasoning_effort": "none",
+        }
+    else:
+        ready = _ensure_model_loaded(base, model_id, settings, require_vision=require_vision)
+        if not ready.ok:
+            return ready
+
+        payload = {
+            "model": model_id,
+            "messages": messages,
+            "temperature": settings["temperature"],
+            "max_tokens": max_tokens,
+            "stream": False,
+            "enable_thinking": False,
+        }
+        if settings.get("gpu_ttl_enabled") and settings.get("gpu_ttl", 0) > 0:
+            payload["ttl"] = settings["gpu_ttl"]
 
     try:
         r = requests.post(
             f"{base}/v1/chat/completions",
             json=payload,
+            headers=headers,
             timeout=settings["timeout"],
         )
     except requests.exceptions.ConnectionError:
-        return LMResult(error="Cannot connect to LM Studio.", kind="fatal")
+        detail = f" at {base}" if strata else ""
+        return LMResult(error=f"Cannot connect to {label}{detail}.", kind="fatal")
     except requests.exceptions.Timeout:
-        return LMResult(error=f"LM Studio timed out after {settings['timeout']} seconds.", kind="fatal")
+        return LMResult(error=f"{label} timed out after {settings['timeout']} seconds.", kind="fatal")
     except Exception as e:
-        return LMResult(error=f"LM Studio request failed: {e}", kind="fatal")
+        return LMResult(error=_mask_key(f"{label} request failed: {e}"), kind="fatal")
 
+    if r.status_code in (401, 403):
+        hint = (
+            " Set the LLMUSE_STRATA_API_KEY environment variable and restart Forge Neo."
+            if strata
+            else ""
+        )
+        return LMResult(
+            error=f"Authentication failed for {label} (HTTP {r.status_code}).{hint}",
+            kind="fatal",
+        )
     if not r.ok:
         return LMResult(
-            error=f"LM Studio returned HTTP {r.status_code}: {_api_error_message(r)}",
+            error=f"{label} returned HTTP {r.status_code}: {_api_error_message(r, provider)}",
             kind="fatal",
         )
 
@@ -339,12 +514,12 @@ def _call_chat(model_id: str, messages: list, max_tokens: int = 512, require_vis
         text = _extract_response_text(data)
         finish_reason = ((data.get("choices") or [{}])[0]).get("finish_reason")
     except Exception as e:
-        return LMResult(error=f"Invalid LM Studio response: {e}", kind="fatal")
+        return LMResult(error=_mask_key(f"Invalid {label} response: {e}"), kind="fatal")
 
     if finish_reason == "length":
-        return LMResult(error="LM Studio output reached the token limit.", kind="length")
+        return LMResult(error=f"{label} output reached the token limit.", kind="length")
     if not text:
-        return LMResult(error="LM Studio returned an empty response.", kind="empty")
+        return LMResult(error=f"{label} returned an empty response.", kind="empty")
     return LMResult(text=text)
 
 
@@ -369,9 +544,10 @@ def _call_chat_with_length_retry(
             require_vision=require_vision,
         )
         if result.kind == "length":
+            label = _provider_name(_provider())
             return LMResult(
                 error=(
-                    "LM Studio output was truncated at the token limit even after retry. "
+                    f"{label} output was truncated at the token limit even after retry. "
                     f"Increase max_tokens further or shorten the instruction. (retry max_tokens={retry_max_tokens})"
                 ),
                 kind="length",
@@ -535,7 +711,7 @@ class LLMDecoratorScript(scripts.Script):
             elem_classes="llm-dec-sp-hidden",
         )
         vision_model_arg = gr.Textbox(
-            value=settings.get("vision_model", ""),
+            value=_selected_model(settings, "img2img"),
             lines=1,
             show_label=False,
             interactive=True,
@@ -571,9 +747,7 @@ class LLMDecoratorScript(scripts.Script):
             settings.get("img2img_instruction", "")
         ).strip()
         system_prompt = str(args[2] if len(args) > 2 else "").strip()
-        vision_model = str(args[3] if len(args) > 3 else "").strip() or str(
-            settings.get("vision_model", "")
-        ).strip()
+        vision_model = str(args[3] if len(args) > 3 else "").strip() or _selected_model(settings, "img2img")
         batch_run_id = str(args[4] if len(args) > 4 else "").strip() or "legacy-batch-run"
 
         if not system_prompt:
@@ -695,9 +869,16 @@ class LLMDecoratorScript(scripts.Script):
         settings = _load_settings()
         initial = _initial_preset(settings, presets, tab)
 
-        model_choices = _get_models(vision_only=(tab == "img2img"))
-        model_key = "vision_model" if tab == "img2img" else "model"
+        model_choices, _kind, model_error = _list_models(
+            _provider(settings), vision_only=(tab == "img2img")
+        )
+        model_key = _model_setting_key(_provider(settings), tab)
         model_value = settings.get(model_key) or None
+        model_notice_html = (
+            f'<div class="llm-dec-notice">&#9888; {html.escape(model_error)[:400]}</div>'
+            if model_error
+            else ""
+        )
         input_value = settings.get("img2img_instruction", "") if tab == "img2img" else ""
         input_placeholder = (
             "Describe how to change the source image…"
@@ -767,6 +948,12 @@ class LLMDecoratorScript(scripts.Script):
                             show_label=False,
                             scale=0,
                         )
+                    # 接続先・モデル一覧に関する警告。通常は非表示で既存レイアウトを変えない。
+                    model_notice = gr.HTML(
+                        value=model_notice_html,
+                        visible=bool(model_error),
+                        elem_id=f"llm_dec_notice_{tab}",
+                    )
                     output = gr.Textbox(
                         lines=4,
                         show_label=False,
@@ -941,26 +1128,39 @@ class LLMDecoratorScript(scripts.Script):
 
             def on_settings_trigger(cmd):
                 if not cmd:
-                    return gr.update()
+                    return gr.update(), gr.update(), gr.update()
                 try:
+                    before = _load_settings()
                     s = _save_settings(json.loads(cmd))
-                    return gr.update(value=json.dumps(s, ensure_ascii=False))
                 except Exception:
-                    return gr.update()
+                    return gr.update(), gr.update(), gr.update()
+
+                provider = _provider(s)
+                if provider == _provider(before) and _provider_base(s, provider) == _provider_base(
+                    before, _provider(before)
+                ):
+                    # 接続先が変わっていない限り、モデル一覧は現在の状態を維持する。
+                    return gr.update(value=json.dumps(s, ensure_ascii=False)), gr.update(), gr.update()
+
+                dropdown, notice = _model_dropdown_state(s, tab)
+                return gr.update(value=json.dumps(s, ensure_ascii=False)), dropdown, notice
 
             settings_trigger.change(
                 fn=on_settings_trigger,
                 inputs=[settings_trigger],
-                outputs=[settings_json],
+                outputs=[settings_json, model_dropdown, model_notice],
             )
 
             def on_force_unload_trigger(_):
+                s = _load_settings()
+                if _is_strata(s):
+                    # Strata選択中はLLMuseからモデルのロード・アンロード要求を出さない。
+                    return "✓ Strata: model management is handled by Strata."
                 try:
-                    base = _load_settings().get("lm_url", LM_STUDIO_BASE)
-                    _unload_all_models(base)
+                    _unload_all_models(_provider_base(s, PROVIDER_LMSTUDIO))
                     return "✓"
                 except Exception as e:
-                    return f"✕ {e}"
+                    return f"✕ {_mask_key(str(e))}"
 
             force_unload_trigger.change(
                 fn=on_force_unload_trigger,
@@ -969,7 +1169,9 @@ class LLMDecoratorScript(scripts.Script):
             )
 
             def on_model_dropdown_change(model_id):
-                s = _save_settings({model_key: model_id or ""})
+                current = _load_settings()
+                key = _model_setting_key(_provider(current), tab)
+                s = _save_settings({key: model_id or ""})
                 return gr.update(value=json.dumps(s, ensure_ascii=False))
 
             model_dropdown.change(
@@ -979,14 +1181,21 @@ class LLMDecoratorScript(scripts.Script):
             )
 
             def on_refresh_models(current_model):
-                choices = _get_models(vision_only=(tab == "img2img"))
-                value = current_model or None
-                return gr.update(choices=choices, value=value)
+                s = _load_settings()
+                ids, kind, message = _list_models(_provider(s), vision_only=(tab == "img2img"))
+                if kind:
+                    # 一覧取得の失敗時は既存の選択を残し、理由だけを表示する。
+                    return gr.update(), _notice_update(message)
+                if current_model:
+                    value = current_model
+                else:
+                    value = ids[0] if (_is_strata(s) and ids) else None
+                return gr.update(choices=ids, value=value), _notice_update("")
 
             refresh_models_btn.click(
                 fn=on_refresh_models,
                 inputs=[model_dropdown],
-                outputs=[model_dropdown],
+                outputs=[model_dropdown, model_notice],
             )
 
             if tab == "img2img":
@@ -1032,13 +1241,13 @@ class LLMDecoratorScript(scripts.Script):
                             user_text,
                             preset_text,
                             image_data,
-                            str(s.get("vision_model", "")),
+                            _selected_model(s, "img2img"),
                         )
                 else:
                     result = _call_lm_text(
                         user_text,
                         preset_text,
-                        str(s.get("model", "")),
+                        _selected_model(s, "txt2img"),
                     )
 
                 should_auto_send = (
