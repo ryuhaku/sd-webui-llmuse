@@ -131,6 +131,14 @@ Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 
 
 ## 更新履歴
 
+### v1.3.0
+
+- img2img タブに対応。Vision モデルを選択し、img2img に投入した画像を読み込んだ英語プロンプトを生成
+- Batch タブに対応。画像ごとに解析してプロンプトを作り替え、Dynamic Prompts をまたいでも同じ画像は再解析しない
+- 致命的なエラー（接続・認証・モデル未選択など）では Batch を停止し、画像側の問題では該当画像のみスキップ
+- 実行結果を fatal / image / empty / length に種別化。出力長不足時の max_tokens 再試行を追加
+- img2img / Batch の使い方と注意事項を README に追記
+
 ### v1.2.0
 
 - 連続生成モードを追加。LLM生成 → 画像生成を自動でループさせることが可能に（contributed by @ryuhaku）
