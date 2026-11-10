@@ -514,7 +514,6 @@ function llmDecOpenSettings(tab) {
     const lmUrl      = s.lm_url              ?? "http://localhost:1234";
     const strataUrl  = s.strata_url          ?? "http://127.0.0.1:47831";
     const provider   = s.provider === "strata" ? "strata" : "lmstudio";
-    const autoSend   = s.auto_send           ?? false;
     const autoGen    = s.auto_generate       ?? false;
     const contGen    = s.continuous_generate ?? false;
     const loopDelay  = s.loop_delay          ?? 500;
@@ -571,16 +570,6 @@ function llmDecOpenSettings(tab) {
                         <input type="number" class="llm-dec-settings-num" id="llm-dec-settings-temp"
                             min="0.1" max="2.0" step="0.1" value="${temp}">
                     </div>
-                </div>
-
-                <!-- Auto-send -->
-                <div class="llm-dec-settings-row">
-                    <label class="llm-dec-settings-label">Auto-send</label>
-                    <label class="llm-dec-settings-check-label">
-                        <input type="checkbox" id="llm-dec-settings-auto-send"
-                            ${autoSend ? "checked" : ""}>
-                        <span class="llm-dec-settings-hint">Send to prompt automatically after generation</span>
-                    </label>
                 </div>
 
                 <!-- Auto-generate -->
@@ -705,7 +694,6 @@ function llmDecSaveSettings(tab) {
     const lmUrl    = document.getElementById("llm-dec-settings-url")?.value.trim()         || "http://localhost:1234";
     const strataUrl = document.getElementById("llm-dec-settings-strata-url")?.value.trim() || "http://127.0.0.1:47831";
     const provider  = document.getElementById("llm-dec-settings-provider")?.value === "strata" ? "strata" : "lmstudio";
-    const autoSend = document.getElementById("llm-dec-settings-auto-send")?.checked        ?? false;
     const autoGen  = document.getElementById("llm-dec-settings-autogen")?.checked          ?? false;
     const contGen  = document.getElementById("llm-dec-settings-continuous")?.checked       ?? false;
     const loopDelay = parseInt(document.getElementById("llm-dec-settings-loop-delay")?.value) || 500;
@@ -718,7 +706,6 @@ function llmDecSaveSettings(tab) {
         gpu_ttl: ttl,
         lm_url: lmUrl,
         strata_url: strataUrl,
-        auto_send: autoSend,
         auto_generate: autoGen,
         continuous_generate: contGen,
         loop_delay: loopDelay

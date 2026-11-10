@@ -102,7 +102,6 @@ Forge Neo の Batch タブで複数の画像をまとめて処理する際、**�
 | LM Studio URL | LM Studio のサーバーアドレス（デフォルト: `http://localhost:1234`） |
 | Strata URL | Strata の Base URL（例: `http://127.0.0.1:47831`）。`/v1` は付けない |
 | Randomness | 出力のランダム性。低いほど忠実、高いほど多様（0.1〜2.0） |
-| Auto-send | 生成後に自動でプロンプト欄へ送信する |
 | Auto-generate | プロンプト欄へ送信後、自動で画像生成を開始する |
 | Continuous | Run LLM → プロンプト送信 → 画像生成を繰り返す |
 | Loop delay | Continuous 有効時に、次の Run LLM を実行するまでの待機時間 |
@@ -132,6 +131,11 @@ Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 
 
 ## 更新履歴
 
+### v1.2.0
+
+- 連続生成モードを追加。LLM生成 → 画像生成を自動でループさせることが可能に（contributed by @ryuhaku）
+- Auto-send 設定を削除（Auto-generate / Continuous で代替可能なため）
+
 ### v1.1.0
 
 - モデル選択欄の右に **Add / Rep** トグルを追加
@@ -139,18 +143,3 @@ Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 
 ### v1.0.0
 
 - 初回リリース
-
-### Unreleased
-
-- Auto-generate と Continuous generation モードを追加
-- img2img / Batch 対応
-  - Vision モデルの選択と、元画像を踏まえた img2img プロンプト生成
-  - Batch タブでの画像ごとのプロンプト生成と、Dynamic Prompts をまたいだ解析結果の再利用
-  - 致命的なエラーではバッチを停止し、画像側の問題は該当画像のみスキップ
-  - 実行結果の種別化（fatal / image / empty / length）と、出力長不足時の max_tokens 再試行
-- 接続先プロバイダー選択（LM Studio / Strata）を追加
-  - Strata は OpenAI 互換 API（`GET /v1/models` / `POST /v1/chat/completions`）を使い、`reasoning_effort: "none"` で推論する
-  - Strata に対してはモデルのロード・アンロード・`ttl` を送らない（モデルと VRAM は Strata 側で管理）
-  - API キーは環境変数 `LLMUSE_STRATA_API_KEY`（または `STRATA_API_KEY`）からのみ読み込み、設定ファイル・画面・ログには出さない
-  - 接続失敗・認証失敗・モデル一覧取得失敗・空応答を区別して表示し、エラー時はプロンプト送信と画像生成を行わない
-  - `provider` 項目が無い既存 settings.json は LM Studio として扱い、既存動作は変えない

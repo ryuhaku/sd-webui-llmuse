@@ -42,7 +42,6 @@ DEFAULT_SETTINGS = {
     "gpu_ttl": 300,
     "lm_url": "http://localhost:1234",
     "strata_url": STRATA_BASE,
-    "auto_send": False,
     "send_mode": "append",
     "auto_generate": False,
     "continuous_generate": False,
@@ -129,8 +128,6 @@ def _save_settings(data: dict):
         s["lm_url"] = str(data["lm_url"]).rstrip("/") or LM_STUDIO_BASE
     if "strata_url" in data:
         s["strata_url"] = str(data["strata_url"]).rstrip("/") or STRATA_BASE
-    if "auto_send" in data:
-        s["auto_send"] = bool(data["auto_send"])
     if "send_mode" in data:
         s["send_mode"] = "replace" if str(data["send_mode"]) == "replace" else "append"
     if "auto_generate" in data:
@@ -1251,8 +1248,7 @@ class LLMDecoratorScript(scripts.Script):
                     )
 
                 should_auto_send = (
-                    s.get("auto_send")
-                    or s.get("auto_generate")
+                    s.get("auto_generate")
                     or s.get("continuous_generate")
                 )
                 if result.ok and should_auto_send:
