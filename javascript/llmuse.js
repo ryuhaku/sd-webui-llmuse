@@ -14,28 +14,58 @@ function llmDecGetSettings(tab) {
 
 /* ── 連続生成状態 ── */
 function llmDecLoopState(tab) {
-    return LLM_DEC_LOOP_STATE[tab] || (LLM_DEC_LOOP_STATE[tab] = {
+    const st = LLM_DEC_LOOP_STATE[tab] || (LLM_DEC_LOOP_STATE[tab] = {
         active: false,
         stopAfterCurrent: false,
+        runningLLM: false,
         runningImage: false,
         generationToken: 0
     });
+
+    // ブラウザを再読み込みせずJSだけ更新された場合も、旧状態オブジェクトを補完する。
+    if (typeof st.runningLLM !== "boolean") st.runningLLM = false;
+    return st;
 }
 
 function llmDecStopLoop(tab) {
-    if (tab) {
-        const st = llmDecLoopState(tab);
+    const stopOne = (targetTab) => {
+        const st = llmDecLoopState(targetTab);
+
+        // LLM処理中または画像生成中なら、現在の1回だけ完了させて停止する。
+        if (st.runningLLM || st.runningImage) {
+            st.active = false;
+            st.stopAfterCurrent = true;
+            llmDecSetLoopBadge(targetTab, "Stopping after this image", "stopping");
+            return;
+        }
+
+        // 画像間の待機中なら、次のRun LLMを開始せず即時停止する。
         st.active = false;
-        st.stopAfterCurrent = true;
-        llmDecSetLoopBadge(tab, "Stopping after this image", "stopping");
+        st.stopAfterCurrent = false;
+        st.generationToken += 1;
+        llmDecSetLoopBadge(targetTab, "");
+    };
+
+    if (tab) {
+        stopOne(tab);
         return;
     }
-    for (const k of Object.keys(LLM_DEC_LOOP_STATE)) {
-        const st = llmDecLoopState(k);
-        st.active = false;
-        st.stopAfterCurrent = true;
-        llmDecSetLoopBadge(k, "Stopping after this image", "stopping");
-    }
+    for (const k of Object.keys(LLM_DEC_LOOP_STATE)) stopOne(k);
+}
+
+function llmDecRestoreRunButton(tab) {
+    const btn = llmDecFindRunButton(tab);
+    if (!btn) return;
+
+    btn.classList.remove(
+        "llm-dec-loop-active",
+        "llm-dec-loop-stopping",
+        "llm-dec-run-busy"
+    );
+    btn.title = btn.dataset.llmDecOrigTitle || "";
+    btn.textContent = "Run LLM";
+    btn.dataset.llmDecOrigText = "Run LLM";
+    btn.dataset.llmDecBusyOrigText = "Run LLM";
 }
 
 function llmDecSetLoopBadge(tab, text, mode = "") {
@@ -43,7 +73,8 @@ function llmDecSetLoopBadge(tab, text, mode = "") {
     if (!btn) return;
 
     btn.dataset.llmDecOrigTitle = btn.dataset.llmDecOrigTitle || btn.title || "";
-    btn.dataset.llmDecOrigText  = btn.dataset.llmDecOrigText  || (btn.textContent || "Run LLM").trim();
+    btn.dataset.llmDecOrigText = "Run LLM";
+    btn.dataset.llmDecBusyOrigText = "Run LLM";
 
     btn.classList.remove("llm-dec-loop-active", "llm-dec-loop-stopping");
 
@@ -58,8 +89,7 @@ function llmDecSetLoopBadge(tab, text, mode = "") {
             btn.classList.add("llm-dec-loop-active");
         }
     } else {
-        btn.title = btn.dataset.llmDecOrigTitle || "";
-        btn.textContent = btn.dataset.llmDecOrigText || "Run LLM";
+        llmDecRestoreRunButton(tab);
     }
 }
 
@@ -80,7 +110,58 @@ function llmDecFindRunButton(tab) {
                .find(b => /run\s*llm/i.test((b.textContent || "").trim()));
 }
 
+function llmDecFindOutputBox(tab) {
+    return gradioApp().querySelector(`#llm_dec_output_${tab} textarea`) ||
+           gradioApp().querySelector(`#llm_dec_output_${tab} input`);
+}
+
+function llmDecSetOutputText(tab, text) {
+    const el = llmDecFindOutputBox(tab);
+    if (!el) return false;
+    el.value = text == null ? "" : String(text);
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+}
+
+function llmDecSetRunBusy(tab, busy, text = "Running LLM...") {
+    const btn = llmDecFindRunButton(tab);
+    if (!btn) return;
+    btn.dataset.llmDecBusyOrigText = "Run LLM";
+    if (busy) {
+        btn.textContent = text;
+        btn.classList.add("llm-dec-run-busy");
+    } else {
+        btn.classList.remove("llm-dec-run-busy");
+        if (!btn.classList.contains("llm-dec-loop-active") && !btn.classList.contains("llm-dec-loop-stopping")) {
+            btn.textContent = "Run LLM";
+        }
+    }
+}
+
+function llmDecWatchBatchGenerate(tab) {
+    const startedAt = Date.now();
+    let sawGenerating = false;
+    llmDecSetRunBusy(tab, true, "Batch running...");
+    const timer = setInterval(() => {
+        const generating = llmDecIsImageGenerating(tab);
+        if (generating) sawGenerating = true;
+        if (generating) {
+            llmDecSetRunBusy(tab, true, "Batch running...");
+            return;
+        }
+        if (sawGenerating || Date.now() - startedAt > 5000) {
+            clearInterval(timer);
+            const st = llmDecLoopState(tab);
+            if (!st.runningLLM && !st.runningImage && !st.active) {
+                llmDecSetRunBusy(tab, false);
+            }
+        }
+    }, 400);
+}
+
 function llmDecClickGenerate(tab) {
+    if (tab === "img2img") llmDecSyncImg2ImgBatchArgs();
     const btn = llmDecFindGenerateButton(tab);
     if (!btn || btn.disabled) return false;
     btn.click();
@@ -158,7 +239,13 @@ async function llmDecStartImageThenMaybeLoop(tab) {
         const delay = parseInt(s.loop_delay ?? 500) || 500;
         llmDecSetLoopBadge(tab, "Continuous LLM generation is active. Right-click Run LLM to stop after current image.", "active");
         await llmDecSleep(delay);
-        if (!st.stopAfterCurrent) llmDecClickRunLLM(tab);
+        if (st.active && !st.stopAfterCurrent) {
+            llmDecClickRunLLM(tab);
+        } else {
+            st.active = false;
+            st.stopAfterCurrent = false;
+            llmDecSetLoopBadge(tab, "");
+        }
     } else {
         llmDecSetLoopBadge(tab, "");
     }
@@ -175,10 +262,204 @@ async function llmDecStartImageThenMaybeLoop(tab) {
         if (!/run\s*llm/i.test((btn.textContent || "").trim()) &&
             !btn.id?.startsWith("llm_dec_run_")) return;
 
-        e.preventDefault();
         const tab = btn.closest("#tab_img2img") ? "img2img" : "txt2img";
+        const st = llmDecLoopState(tab);
+
+        // Continuous開始前や停止要求済みの状態では、通常の右クリックとして扱う。
+        if ((!st.active && !st.runningLLM && !st.runningImage) || st.stopAfterCurrent) return;
+
+        e.preventDefault();
         llmDecStopLoop(tab);
     }, true);
+})();
+
+
+/* ── img2img画像取得 / Batch引数同期 ── */
+function llmDecIsVisible(el) {
+    if (!el || el.hidden) return false;
+    const style = window.getComputedStyle(el);
+    return style.display !== "none" && style.visibility !== "hidden" && el.getClientRects().length > 0;
+}
+
+function llmDecGetImg2ImgMode() {
+    const app = gradioApp();
+    const batch = app.querySelector("#img2img_batch_tab");
+    if (llmDecIsVisible(batch)) return "batch";
+
+    const standard = app.querySelector("#img2img_img2img_tab");
+    if (!standard || llmDecIsVisible(standard)) return "standard";
+    return "unsupported";
+}
+
+function llmDecExtractImageDataUrl(raw) {
+    const value = (raw || "").trim();
+    if (value.startsWith("data:image/")) return value;
+    if (!value) return "";
+
+    try {
+        const parsed = JSON.parse(value);
+        if (typeof parsed === "string") return llmDecExtractImageDataUrl(parsed);
+        if (parsed && typeof parsed === "object") {
+            for (const key of ["background", "composite", "image", "data"]) {
+                const found = llmDecExtractImageDataUrl(parsed[key]);
+                if (found) return found;
+            }
+        }
+    } catch (_) {
+        // LogicalImage normally stores a plain data URL; JSON support is only a fallback.
+    }
+    return "";
+}
+
+function llmDecGetStandardImg2ImgImage() {
+    const app = gradioApp();
+    const roots = [
+        app.querySelector("#img2img_img2img_tab"),
+        app.querySelector("#img2img_image"),
+        app
+    ].filter(Boolean);
+
+    for (const root of roots) {
+        const candidates = [
+            ...root.querySelectorAll(".logical_image_background textarea"),
+            ...root.querySelectorAll("textarea")
+        ];
+        for (const el of candidates) {
+            const value = llmDecExtractImageDataUrl(el.value);
+            if (value) return value;
+        }
+
+        const imageEl = root.querySelector("img[src^='data:image/']");
+        if (imageEl?.src) return imageEl.src;
+    }
+    return "";
+}
+
+function llmDecMarkLLMRunStarted(tab) {
+    const s = llmDecGetSettings(tab);
+    const st = llmDecLoopState(tab);
+
+    if (!s.continuous_generate) {
+        st.runningLLM = false;
+        llmDecSetRunBusy(tab, false);
+        return;
+    }
+
+    // バックエンドのLLM応答を待っている間から、右クリック停止を受け付ける。
+    llmDecSetRunBusy(tab, true, "Running LLM...");
+    st.runningLLM = true;
+    st.active = true;
+    st.stopAfterCurrent = false;
+    llmDecSetLoopBadge(
+        tab,
+        "Continuous LLM generation is active. Right-click Run LLM to stop after current image.",
+        "active"
+    );
+}
+
+function llmDecPrepareRunInputs(userInput, systemPrompt, imageData, tab) {
+    if (tab !== "img2img") {
+        llmDecMarkLLMRunStarted(tab);
+        return [userInput, systemPrompt, imageData || ""];
+    }
+
+    llmDecSyncImg2ImgBatchArgs();
+    const mode = llmDecGetImg2ImgMode();
+    if (mode === "batch") {
+        llmDecSetRunBusy(tab, true, "Starting batch...");
+        llmDecSetOutputText(tab, "Starting batch analysis... prompts will be generated during batch generation.");
+        return [userInput, systemPrompt, "__LLMUSE_BATCH_MODE__"];
+    }
+    if (mode !== "standard") return [userInput, systemPrompt, "__LLMUSE_UNSUPPORTED_IMG2IMG_MODE__"];
+
+    llmDecMarkLLMRunStarted(tab);
+    return [userInput, systemPrompt, llmDecGetStandardImg2ImgImage()];
+}
+
+function llmDecSetHiddenTextbox(elemId, value) {
+    const root = gradioApp().querySelector(`#${elemId}`);
+    const el = root?.querySelector("textarea, input");
+    if (!el) return false;
+    const next = value == null ? "" : String(value);
+    if (el.value === next) return true;
+    el.value = next;
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+}
+
+function llmDecBeginImg2ImgBatchRun() {
+    const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    llmDecSetHiddenTextbox("llm_dec_batch_run_id_arg_img2img", runId);
+    return runId;
+}
+
+function llmDecSyncImg2ImgBatchArgs() {
+    const app = gradioApp();
+    const instruction = app.querySelector("#llm_dec_input_img2img textarea")?.value || "";
+    const systemPrompt = app.querySelector("#llm_dec_sp_img2img textarea")?.value || "";
+    const visionModel = app.querySelector("#llm_dec_model_dropdown_img2img input")?.value || "";
+    const batchEnabled = !!app.querySelector("#llm_dec_batch_vision_img2img input[type='checkbox']")?.checked;
+
+    llmDecSetHiddenTextbox("llm_dec_batch_enabled_arg_img2img", batchEnabled ? "true" : "false");
+    llmDecSetHiddenTextbox("llm_dec_instruction_arg_img2img", instruction);
+    llmDecSetHiddenTextbox("llm_dec_system_prompt_arg_img2img", systemPrompt);
+    llmDecSetHiddenTextbox("llm_dec_vision_model_arg_img2img", visionModel);
+}
+
+function llmDecEnableBatchVision() {
+    const app = gradioApp();
+    const checkbox = app.querySelector("#llm_dec_batch_vision_img2img input[type='checkbox']");
+    if (!checkbox) return false;
+
+    if (!checkbox.checked) {
+        checkbox.checked = true;
+        checkbox.dispatchEvent(new Event("input", { bubbles: true }));
+        checkbox.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    return true;
+}
+
+function llmDecStartBatchFromRunLLM(tab) {
+    if (tab !== "img2img" || llmDecGetImg2ImgMode() !== "batch") return false;
+
+    // Run LLMから開始したBatchは、各画像解析を必ず有効にする。
+    llmDecEnableBatchVision();
+    llmDecSyncImg2ImgBatchArgs();
+    const ok = llmDecClickGenerate("img2img");
+    if (ok) {
+        llmDecSetOutputText(tab, "Batch analysis is running. The backend generates a prompt for each image during Generate.");
+        llmDecWatchBatchGenerate(tab);
+    } else {
+        llmDecSetRunBusy(tab, false);
+    }
+    return ok;
+}
+
+(function llmDecInstallImg2ImgSync() {
+    if (window.__llm_dec_img2img_sync_installed) return;
+    window.__llm_dec_img2img_sync_installed = true;
+
+    // Generateの値収集より先に、LLMuseの表示値をAlwaysVisible script引数へ同期する。
+    document.addEventListener("click", function(e) {
+        const btn = e.target.closest?.("button");
+        if (!btn) return;
+        if (btn.id === "img2img_generate" || btn.closest("#img2img_generate")) {
+            if (llmDecGetImg2ImgMode() === "batch") {
+                llmDecBeginImg2ImgBatchRun();
+            }
+            llmDecSyncImg2ImgBatchArgs();
+        }
+    }, true);
+
+    document.addEventListener("input", function(e) {
+        if (e.target.closest?.("#llm_dec_img2img")) llmDecSyncImg2ImgBatchArgs();
+    }, true);
+    document.addEventListener("change", function(e) {
+        if (e.target.closest?.("#llm_dec_img2img")) llmDecSyncImg2ImgBatchArgs();
+    }, true);
+
+    setTimeout(llmDecSyncImg2ImgBatchArgs, 1000);
 })();
 
 
@@ -419,7 +700,7 @@ function llmDecSendAndMaybeGenerate(text, tab, fromLLM) {
     llmDecSend(text, tab, forceReplace);
 
     // Continuousは「Run LLMの結果」からだけ開始する。
-    // Sendボタンで古い出力を手動送信しただけでは、意図せずループ開始しないようにする。
+    // LLM処理中に停止予約された場合は、その予約を維持して現在の画像だけ生成する。
     if (fromLLM && s.continuous_generate && !st.stopAfterCurrent) {
         st.active = true;
         llmDecSetLoopBadge(tab, "Continuous LLM generation is active. Right-click Run LLM to stop after current image.", "active");
@@ -434,6 +715,24 @@ function llmDecSendAndMaybeGenerate(text, tab, fromLLM) {
 }
 
 function llmDecAutoSend(text, tab) {
+    if (text === "__LLMUSE_START_BATCH__") {
+        llmDecStartBatchFromRunLLM(tab);
+        return "";
+    }
+
+    const st = llmDecLoopState(tab);
+    st.runningLLM = false;
+    if (tab !== "img2img" || llmDecGetImg2ImgMode() !== "batch") llmDecSetRunBusy(tab, false);
+
+    // LLM側でエラーまたは空結果になった場合は、画像生成へ進まず状態を解除する。
+    if (!text) {
+        st.active = false;
+        st.stopAfterCurrent = false;
+        llmDecSetLoopBadge(tab, "");
+        llmDecSetRunBusy(tab, false);
+        return text;
+    }
+
     return llmDecSendAndMaybeGenerate(text, tab, true);
 }
 
@@ -638,6 +937,9 @@ function llmDecDeleteFromModal(tab) {
 (function injectStyle() {
     const css = `
 .llm-dec-sp-hidden { display: none !important; }
+#llm_dec_refresh_models_txt2img button,
+#llm_dec_refresh_models_img2img button { min-width: 40px !important; }
+#llm_dec_batch_vision_img2img { margin-top: 2px; margin-bottom: 4px; }
 
 /* ── モーダル共通 ── */
 #llm-dec-modal,
@@ -784,6 +1086,15 @@ function llmDecDeleteFromModal(tab) {
     font-size: 12px; font-family: monospace; outline: none;
 }
 .llm-dec-settings-url:focus { border-color: var(--body-text-color-subdued); }
+
+.llm-dec-run-busy {
+    background: #374151 !important;
+    color: #ffffff !important;
+    border-color: #9ca3af !important;
+    font-weight: 700 !important;
+    box-shadow: none !important;
+    animation: none !important;
+}
 
 .llm-dec-loop-active {
     background: #6b7280 !important;
