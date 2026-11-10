@@ -10,8 +10,11 @@ LM Studio のローカル LLM を使って、日本語入力から英語プロ�
 - Simple / Normal / Detail の 3 段階プリセットで生成の詳細度を調整
 - プリセットのシステムプロンプトを自由に編集・追加・削除可能
 - 使用するモデルをドロップダウンで切り替え
+- 接続先を LM Studio / Strata から選択
 - 生成結果を Forge Neo のプロンプト欄へ自動送信
 - Run LLM → 画像生成を繰り返す連続生成モード
+- img2img タブでは元画像を Vision モデルで読み込み、変更点だけを反映した英語プロンプトを生成
+- Forge Neo の Batch タブでは、画像ごとに解析してプロンプトを作り替え
 
 ## インストール方法
 
@@ -64,6 +67,33 @@ txt2img タブのプロンプト欄の下に **「✦ LLMuse」** アコーデ�
    - **Rep** — 既存のプロンプトを上書き
 5. **Send** をクリックして Forge Neo のプロンプト欄へ送信
 
+### img2img タブでの使い方（Vision モデル）
+
+img2img タブにも同じアコーディオンが表示され、**元画像を Vision モデルで解析した英語プロンプト**を作成できます。
+
+1. img2img タブに画像を投入
+2. LLMuse のモデル欄で **Vision 対応モデル**を選択（一覧には vision 対応のモデルのみが表示されます）
+3. 左の欄に**日本語で変更内容を入力**して **Run LLM**
+   - 未入力の場合は「元画像を忠実に再現する」扱いになります
+4. 生成されたプロンプトを Add / Rep で送信し、そのまま img2img 生成を実行
+
+- 送信する画像は回転補正を行ったうえで長辺 1536px に縮小し、JPEG（品質 90）として渡します
+- 指示しなかった部分は元画像を保つように扱います
+- Vision 非対応のモデルを選んだ場合はエラーを表示し、実行しません
+
+### Batch タブでの使い方（画像ごとの解析）
+
+Forge Neo の Batch タブで複数の画像をまとめて処理する際、**画像ごとに LLMuse でプロンプトを作り替える**ことができます。
+
+1. LLMuse の **「Analyze each batch image」** にチェックを入れる
+2. Batch タブで画像を選択・アップロード（入力ディレクトリの指定も可能です）
+3. Forge Neo の **Generate** を押す（LLMuse の Run LLM から Batch を開始することもできます）
+
+- 各画像は 1 回だけ解析し、その画像専用のプロンプトに置き換えます。生成情報（parameters）には `LLMuse Batch` / `LLMuse Prompt` が記録されます
+- Dynamic Prompts で複数の組み合わせを作成しても、同じ画像の再解析は行いません
+- 接続失敗・認証失敗・モデル未選択などの致命的なエラーでは Batch を停止し、画像の準備不良や空応答ではその画像だけをスキップします
+- 対応するのは標準の img2img タブと Batch タブで、Sketch / Inpaint 系は対象外です
+
 ### 設定（⚙ ボタン）
 
 | 項目 | 説明 |
@@ -113,6 +143,11 @@ Continuous を有効にすると、`Run LLM → プロンプト欄へ送信 → 
 ### Unreleased
 
 - Auto-generate と Continuous generation モードを追加
+- img2img / Batch 対応
+  - Vision モデルの選択と、元画像を踏まえた img2img プロンプト生成
+  - Batch タブでの画像ごとのプロンプト生成と、Dynamic Prompts をまたいだ解析結果の再利用
+  - 致命的なエラーではバッチを停止し、画像側の問題は該当画像のみスキップ
+  - 実行結果の種別化（fatal / image / empty / length）と、出力長不足時の max_tokens 再試行
 - 接続先プロバイダー選択（LM Studio / Strata）を追加
   - Strata は OpenAI 互換 API（`GET /v1/models` / `POST /v1/chat/completions`）を使い、`reasoning_effort: "none"` で推論する
   - Strata に対してはモデルのロード・アンロード・`ttl` を送らない（モデルと VRAM は Strata 側で管理）
